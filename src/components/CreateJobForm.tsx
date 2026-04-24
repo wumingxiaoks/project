@@ -75,7 +75,15 @@ export function CreateJobForm({ providers }: Props) {
   const [aspect, setAspect] = useState('16:9');
   const [imageAssetId, setImageAssetId] = useState<string | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [videoAssetId, setVideoAssetId] = useState<string | null>(null);
+  const [videoPreview, setVideoPreview] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadingVideo, setUploadingVideo] = useState(false);
+  const [characterOrientation, setCharacterOrientation] = useState<'image' | 'video'>(
+    'video',
+  );
+  const [keepOriginalSound, setKeepOriginalSound] = useState(true);
+  const [quality, setQuality] = useState<'std' | 'pro'>('std');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
@@ -96,24 +104,48 @@ export function CreateJobForm({ providers }: Props) {
     setMode(firstMode);
   }
 
+  async function uploadFile(
+    file: File,
+    kind: 'image' | 'video',
+  ): Promise<{ id: string; url: string }> {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('kind', kind);
+    const res = await fetch('/api/uploads', { method: 'POST', body: fd });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    return { id: data.asset.id, url: data.asset.url };
+  }
+
   async function onImageSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     setUploading(true);
     setError(null);
     try {
-      const fd = new FormData();
-      fd.append('file', file);
-      fd.append('kind', 'image');
-      const res = await fetch('/api/uploads', { method: 'POST', body: fd });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      setImageAssetId(data.asset.id);
-      setImagePreview(data.asset.url);
+      const { id, url } = await uploadFile(file, 'image');
+      setImageAssetId(id);
+      setImagePreview(url);
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function onVideoSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadingVideo(true);
+    setError(null);
+    try {
+      const { id, url } = await uploadFile(file, 'video');
+      setVideoAssetId(id);
+      setVideoPreview(url);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setUploadingVideo(false);
     }
   }
 
@@ -126,12 +158,25 @@ export function CreateJobForm({ providers }: Props) {
       );
       return;
     }
-    if (mode === 'image-to-video' && !imageAssetId) {
-      setError('Please upload an image first.');
+    if ((mode === 'image-to-video' || mode === 'act') && !imageAssetId) {
+      setError('Please upload a character image first.');
+      return;
+    }
+    if (mode === 'act' && !videoAssetId) {
+      setError('Please upload a reference motion video first.');
       return;
     }
     setSubmitting(true);
     try {
+      const params: Record<string, unknown> = {
+        duration,
+        aspect_ratio: aspect,
+        quality,
+      };
+      if (mode === 'act') {
+        params.character_orientation = characterOrientation;
+        params.keep_original_sound = keepOriginalSound;
+      }
       const res = await fetch('/api/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -143,7 +188,8 @@ export function CreateJobForm({ providers }: Props) {
           prompt,
           negativePrompt: negativePrompt || undefined,
           inputImageAssetId: imageAssetId ?? undefined,
-          params: { duration, aspect_ratio: aspect },
+          inputVideoAssetId: mode === 'act' ? videoAssetId ?? undefined : undefined,
+          params,
         }),
       });
       if (!res.ok) {
@@ -253,8 +299,8 @@ export function CreateJobForm({ providers }: Props) {
         </Field>
       </div>
 
-      {mode === 'image-to-video' && (
-        <Field label="Source image">
+      {(mode === 'image-to-video' || mode === 'act') && (
+        <Field label={mode === 'act' ? 'Character image' : 'Source image'}>
           <div className="flex items-start gap-4">
             <label className="flex h-32 w-32 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-xs text-slate-500 hover:border-brand-400 hover:bg-brand-50">
               {imagePreview ? (
@@ -277,11 +323,83 @@ export function CreateJobForm({ providers }: Props) {
               />
             </label>
             <p className="text-xs text-slate-500">
-              JPG / PNG / WebP. Stored in your S3 bucket, then sent to the
-              provider as a URL.
+              {mode === 'act'
+                ? 'JPG / PNG. Person should be clearly visible (head + torso), area ≥ 5% of frame, aspect between 1:2.5 and 2.5:1, ≤10MB.'
+                : 'JPG / PNG / WebP. Stored in your S3 bucket, then sent to the provider as a URL.'}
             </p>
           </div>
         </Field>
+      )}
+
+      {mode === 'act' && (
+        <>
+          <Field label="Reference motion video">
+            <div className="flex items-start gap-4">
+              <label className="flex h-32 w-48 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-xs text-slate-500 hover:border-brand-400 hover:bg-brand-50">
+                {videoPreview ? (
+                  <video
+                    src={videoPreview}
+                    muted
+                    className="h-full w-full rounded-lg object-cover"
+                  />
+                ) : uploadingVideo ? (
+                  <span>Uploading…</span>
+                ) : (
+                  <span>Click to upload video</span>
+                )}
+                <input
+                  type="file"
+                  accept="video/mp4,video/quicktime"
+                  className="hidden"
+                  onChange={onVideoSelected}
+                />
+              </label>
+              <p className="text-xs text-slate-500">
+                MP4 / MOV, single-shot, one realistic person (upper or full
+                body, head visible), 3–30 seconds, ≤100MB. The character in
+                your image will perform the same actions as this video.
+              </p>
+            </div>
+          </Field>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Character orientation">
+              <select
+                className="input"
+                value={characterOrientation}
+                onChange={(e) =>
+                  setCharacterOrientation(e.target.value as 'image' | 'video')
+                }
+              >
+                <option value="video">
+                  match reference video (up to 30s, better for complex motion)
+                </option>
+                <option value="image">
+                  match character image (up to 10s, better for camera moves)
+                </option>
+              </select>
+            </Field>
+            <Field label="Quality">
+              <select
+                className="input"
+                value={quality}
+                onChange={(e) => setQuality(e.target.value as 'std' | 'pro')}
+              >
+                <option value="std">std (cost-effective)</option>
+                <option value="pro">pro (higher quality)</option>
+              </select>
+            </Field>
+          </div>
+
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={keepOriginalSound}
+              onChange={(e) => setKeepOriginalSound(e.target.checked)}
+            />
+            Keep original audio from reference video
+          </label>
+        </>
       )}
 
       <Field label="Prompt">
