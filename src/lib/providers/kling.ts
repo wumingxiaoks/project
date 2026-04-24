@@ -1,37 +1,57 @@
 import crypto from 'node:crypto';
-import { env } from '../env';
 import type {
+  CredentialFieldSpec,
+  CredentialPayload,
   GenerateInput,
   GenerateResult,
   ModelDescriptor,
   TaskStatus,
   VideoProvider,
 } from './types';
-import { ProviderNotConfiguredError } from './types';
 
 /**
  * Kling (Kuaishou) adapter.
  * Docs: https://app.klingai.com/global/dev/document-api
- *
- * Auth: JWT (HS256) with AccessKey as `iss`, signed with SecretKey,
- * short TTL (~30 min), sent as `Authorization: Bearer <jwt>`.
+ * Auth: JWT (HS256) using AK as `iss`, signed with SK; Bearer header.
  */
 
+const DEFAULT_API_BASE = 'https://api-singapore.klingai.com';
+
 const MODELS: ModelDescriptor[] = [
-  {
-    id: 'kling-v2-1',
-    label: 'Kling v2.1',
-    modes: ['image-to-video', 'text-to-video'],
-  },
+  { id: 'kling-v2-1', label: 'Kling v2.1', modes: ['image-to-video', 'text-to-video'] },
   {
     id: 'kling-v2-1-master',
-    label: 'Kling v2.1 Master (higher quality)',
+    label: 'Kling v2.1 Master',
     modes: ['image-to-video', 'text-to-video'],
   },
+  { id: 'kling-v1-6', label: 'Kling v1.6', modes: ['image-to-video', 'text-to-video'] },
+];
+
+const CREDENTIAL_FIELDS: CredentialFieldSpec[] = [
   {
-    id: 'kling-v1-6',
-    label: 'Kling v1.6',
-    modes: ['image-to-video', 'text-to-video'],
+    key: 'accessKey',
+    label: 'Access Key',
+    type: 'text',
+    required: true,
+    secret: false,
+    placeholder: 'AK...',
+  },
+  {
+    key: 'secretKey',
+    label: 'Secret Key',
+    type: 'password',
+    required: true,
+    secret: true,
+    placeholder: 'SK...',
+  },
+  {
+    key: 'apiBase',
+    label: 'API Base',
+    type: 'url',
+    required: false,
+    secret: false,
+    defaultValue: DEFAULT_API_BASE,
+    helpText: `Default ${DEFAULT_API_BASE} (Singapore). China endpoint uses https://api.klingai.com`,
   },
 ];
 
@@ -43,17 +63,13 @@ function base64url(input: Buffer | string) {
     .replace(/\//g, '_');
 }
 
-function signJwt(): string {
-  const ak = env.KLING_ACCESS_KEY;
-  const sk = env.KLING_SECRET_KEY;
-  if (!ak || !sk) throw new ProviderNotConfiguredError('kling');
+function signJwt(cred: CredentialPayload): string {
+  const ak = cred.secrets.accessKey ?? cred.config.accessKey;
+  const sk = cred.secrets.secretKey;
+  if (!ak || !sk) throw new Error('Kling accessKey/secretKey missing');
   const now = Math.floor(Date.now() / 1000);
   const header = { alg: 'HS256', typ: 'JWT' };
-  const payload = {
-    iss: ak,
-    exp: now + 1800,
-    nbf: now - 5,
-  };
+  const payload = { iss: ak, exp: now + 1800, nbf: now - 5 };
   const signingInput = `${base64url(JSON.stringify(header))}.${base64url(
     JSON.stringify(payload),
   )}`;
@@ -61,9 +77,17 @@ function signJwt(): string {
   return `${signingInput}.${base64url(sig)}`;
 }
 
-async function klingFetch(path: string, init?: RequestInit) {
-  const token = signJwt();
-  const res = await fetch(`${env.KLING_API_BASE}${path}`, {
+function baseUrl(cred: CredentialPayload): string {
+  return (cred.config.apiBase as string) || DEFAULT_API_BASE;
+}
+
+async function klingFetch(
+  path: string,
+  cred: CredentialPayload,
+  init?: RequestInit,
+) {
+  const token = signJwt(cred);
+  const res = await fetch(`${baseUrl(cred)}${path}`, {
     ...init,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -88,9 +112,9 @@ export const klingProvider: VideoProvider = {
   id: 'kling',
   name: 'Kling',
   models: MODELS,
-  isConfigured: () => Boolean(env.KLING_ACCESS_KEY && env.KLING_SECRET_KEY),
+  credentialFields: CREDENTIAL_FIELDS,
 
-  async generate(input: GenerateInput): Promise<GenerateResult> {
+  async generate(input): Promise<GenerateResult> {
     const params = (input.params ?? {}) as Record<string, unknown>;
     const modelName = (params.model as string) ?? 'kling-v2-1';
     const duration = String(params.duration ?? '5');
@@ -98,7 +122,7 @@ export const klingProvider: VideoProvider = {
     const aspectRatio = (params.aspect_ratio as string) ?? '16:9';
 
     if (input.mode === 'image-to-video') {
-      if (!input.imageUrl) throw new Error('imageUrl required for image-to-video');
+      if (!input.imageUrl) throw new Error('imageUrl required');
       const body: Record<string, unknown> = {
         model_name: modelName,
         image: input.imageUrl,
@@ -109,7 +133,7 @@ export const klingProvider: VideoProvider = {
         duration,
       };
       if (input.webhookUrl) body.callback_url = input.webhookUrl;
-      const data = await klingFetch('/v1/videos/image2video', {
+      const data = await klingFetch('/v1/videos/image2video', input.credential, {
         method: 'POST',
         body: JSON.stringify(body),
       });
@@ -127,7 +151,7 @@ export const klingProvider: VideoProvider = {
         duration,
       };
       if (input.webhookUrl) body.callback_url = input.webhookUrl;
-      const data = await klingFetch('/v1/videos/text2video', {
+      const data = await klingFetch('/v1/videos/text2video', input.credential, {
         method: 'POST',
         body: JSON.stringify(body),
       });
@@ -137,10 +161,13 @@ export const klingProvider: VideoProvider = {
     throw new Error(`Kling does not support mode: ${input.mode}`);
   },
 
-  async getStatus(providerTaskId: string): Promise<TaskStatus> {
+  async getStatus(providerTaskId, credential): Promise<TaskStatus> {
     const data = await klingFetch(
       `/v1/videos/image2video/${providerTaskId}`,
-    ).catch(() => klingFetch(`/v1/videos/text2video/${providerTaskId}`));
+      credential,
+    ).catch(() =>
+      klingFetch(`/v1/videos/text2video/${providerTaskId}`, credential),
+    );
     const status = data?.data?.task_status as string | undefined;
     const state = mapState(status);
     const videoUrl: string | undefined =
@@ -169,6 +196,19 @@ export const klingProvider: VideoProvider = {
         raw: data,
       },
     };
+  },
+
+  async testCredential(credential) {
+    try {
+      // Listing tasks with page_size=1 is a cheap, auth-only endpoint.
+      await klingFetch(
+        '/v1/videos/image2video?pageNum=1&pageSize=1',
+        credential,
+      );
+      return { ok: true, message: 'OK' };
+    } catch (err) {
+      return { ok: false, message: (err as Error).message };
+    }
   },
 };
 

@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { db, schema } from '@/lib/db';
 import { getJob } from '@/lib/jobs';
 import { getProvider } from '@/lib/providers';
+import { getCredentialPayload } from '@/lib/credentials';
 
 export const runtime = 'nodejs';
 
@@ -53,10 +54,13 @@ export async function DELETE(
   const { id } = await params;
   const job = await getJob(id);
   if (!job) return NextResponse.json({ error: 'not found' }, { status: 404 });
-  if (job.providerTaskId) {
+  if (job.providerTaskId && job.credentialId) {
     try {
       const provider = getProvider(job.provider);
-      await provider.cancel?.(job.providerTaskId);
+      const credential = await getCredentialPayload(job.credentialId);
+      if (credential && provider.cancel) {
+        await provider.cancel(job.providerTaskId, credential);
+      }
     } catch (err) {
       console.warn('[cancel] provider cancel failed', err);
     }

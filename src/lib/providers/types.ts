@@ -3,8 +3,33 @@ export type ProviderId = 'replicate' | 'kling' | 'minimax';
 export type JobMode =
   | 'image-to-video'
   | 'text-to-video'
-  | 'act' // reference-video driven action
+  | 'act'
   | 'talking-head';
+
+/** Describes a field that the UI should render for a credential. */
+export interface CredentialFieldSpec {
+  key: string;
+  label: string;
+  type: 'text' | 'password' | 'url';
+  required: boolean;
+  secret: boolean;
+  placeholder?: string;
+  defaultValue?: string;
+  helpText?: string;
+}
+
+/**
+ * A credential is a named set of fields (some secret) that lets us call
+ * a specific provider. Secret fields live inside `secrets`; non-secret
+ * fields (e.g. API base URL, region) live inside `config`.
+ */
+export interface CredentialPayload {
+  id: string;
+  provider: ProviderId;
+  label: string;
+  config: Record<string, string | undefined>;
+  secrets: Record<string, string | undefined>;
+}
 
 export interface GenerateInput {
   jobId: string;
@@ -16,6 +41,7 @@ export interface GenerateInput {
   audioUrl?: string;
   params?: Record<string, unknown>;
   webhookUrl?: string;
+  credential: CredentialPayload;
 }
 
 export interface GenerateResult {
@@ -23,7 +49,12 @@ export interface GenerateResult {
   raw?: Record<string, unknown>;
 }
 
-export type TaskState = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled';
+export type TaskState =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'canceled';
 
 export interface TaskStatus {
   state: TaskState;
@@ -34,7 +65,7 @@ export interface TaskStatus {
 }
 
 export interface ModelDescriptor {
-  id: string; // provider-specific model id
+  id: string;
   label: string;
   modes: JobMode[];
   description?: string;
@@ -44,19 +75,27 @@ export interface VideoProvider {
   id: ProviderId;
   name: string;
   models: ModelDescriptor[];
-  isConfigured(): boolean;
+  credentialFields: CredentialFieldSpec[];
   generate(input: GenerateInput): Promise<GenerateResult>;
-  getStatus(providerTaskId: string): Promise<TaskStatus>;
-  cancel?(providerTaskId: string): Promise<void>;
-  parseWebhook?(headers: Record<string, string>, body: unknown): Promise<{
-    providerTaskId: string;
-    status: TaskStatus;
-  } | null>;
+  getStatus(
+    providerTaskId: string,
+    credential: CredentialPayload,
+  ): Promise<TaskStatus>;
+  cancel?(
+    providerTaskId: string,
+    credential: CredentialPayload,
+  ): Promise<void>;
+  parseWebhook?(
+    headers: Record<string, string>,
+    body: unknown,
+  ): Promise<{ providerTaskId: string; status: TaskStatus } | null>;
+  /** Lightweight auth check; used by the "Test" button in the UI. */
+  testCredential(credential: CredentialPayload): Promise<{ ok: boolean; message: string }>;
 }
 
-export class ProviderNotConfiguredError extends Error {
-  constructor(provider: ProviderId) {
-    super(`Provider ${provider} is not configured. Check environment variables.`);
-    this.name = 'ProviderNotConfiguredError';
+export class ProviderAuthError extends Error {
+  constructor(provider: ProviderId, msg: string) {
+    super(`[${provider}] ${msg}`);
+    this.name = 'ProviderAuthError';
   }
 }

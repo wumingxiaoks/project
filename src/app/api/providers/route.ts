@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
-import { listProviders } from '@/lib/providers';
+import { describeProviders } from '@/lib/providers';
 
 export const runtime = 'nodejs';
 
 export async function GET() {
-  return NextResponse.json({ providers: listProviders() });
+  return NextResponse.json({ providers: describeProviders() });
 }

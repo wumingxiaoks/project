@@ -8,6 +8,7 @@ export const runtime = 'nodejs';
 
 const createSchema = z.object({
   provider: z.enum(['replicate', 'kling', 'minimax']),
+  credentialId: z.string().optional(),
   model: z.string().min(1),
   mode: z.enum(['image-to-video', 'text-to-video', 'act', 'talking-head']),
   prompt: z.string().optional(),
@@ -36,6 +37,13 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  const job = await createJob(parsed.data);
-  return NextResponse.json({ job });
+  try {
+    const job = await createJob(parsed.data);
+    return NextResponse.json({ job });
+  } catch (err) {
+    return NextResponse.json(
+      { error: (err as Error).message },
+      { status: 400 },
+    );
+  }
 }

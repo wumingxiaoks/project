@@ -23,6 +23,35 @@ export const providerEnum = pgEnum('provider', [
   'minimax',
 ]);
 
+export const credentials = pgTable(
+  'credentials',
+  {
+    id: text('id').primaryKey(),
+    provider: providerEnum('provider').notNull(),
+    label: text('label').notNull(),
+    isDefault: text('is_default').notNull().default('false'),
+    // Encrypted JSON blob of secret fields. Format: "<ivHex>:<authTagHex>:<cipherHex>"
+    secretEncrypted: text('secret_encrypted').notNull(),
+    // Non-secret fields (e.g. API base URL, group id overrides, region).
+    config: jsonb('config').$type<Record<string, unknown>>().notNull().default({}),
+    lastTestedAt: timestamp('last_tested_at', { withTimezone: true }),
+    lastTestOk: text('last_test_ok'),
+    lastTestMessage: text('last_test_message'),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    providerIdx: index('credentials_provider_idx').on(t.provider),
+  }),
+);
+
+export type Credential = typeof credentials.$inferSelect;
+export type NewCredential = typeof credentials.$inferInsert;
+
 export const assets = pgTable(
   'assets',
   {
@@ -47,6 +76,7 @@ export const jobs = pgTable(
   {
     id: text('id').primaryKey(),
     provider: providerEnum('provider').notNull(),
+    credentialId: text('credential_id'),
     model: text('model').notNull(),
     mode: text('mode').notNull(), // 'image-to-video' | 'act' | 'talking-head' | ...
     status: jobStatusEnum('status').notNull().default('queued'),

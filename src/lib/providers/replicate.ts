@@ -1,18 +1,16 @@
-import { env } from '../env';
 import type {
+  CredentialFieldSpec,
+  CredentialPayload,
   GenerateInput,
   GenerateResult,
   ModelDescriptor,
   TaskStatus,
   VideoProvider,
 } from './types';
-import { ProviderNotConfiguredError } from './types';
 
 /**
  * Replicate adapter.
- * Uses the official prediction API. Model is selected via `params.model`
- * which should be `owner/name` or `owner/name:version`.
- *
+ * Model is selected via `params.model` ("owner/name" or "owner/name:version").
  * Docs: https://replicate.com/docs/reference/http
  */
 
@@ -39,9 +37,30 @@ const DEFAULT_MODELS: ModelDescriptor[] = [
   },
 ];
 
-async function replicateFetch(path: string, init?: RequestInit) {
-  const token = env.REPLICATE_API_TOKEN;
-  if (!token) throw new ProviderNotConfiguredError('replicate');
+const CREDENTIAL_FIELDS: CredentialFieldSpec[] = [
+  {
+    key: 'apiToken',
+    label: 'API Token',
+    type: 'password',
+    required: true,
+    secret: true,
+    placeholder: 'r8_************************',
+    helpText: 'https://replicate.com/account/api-tokens',
+  },
+];
+
+function getToken(cred: CredentialPayload): string {
+  const t = cred.secrets.apiToken;
+  if (!t) throw new Error('Replicate apiToken is missing');
+  return t;
+}
+
+async function replicateFetch(
+  path: string,
+  cred: CredentialPayload,
+  init?: RequestInit,
+) {
+  const token = getToken(cred);
   const res = await fetch(`https://api.replicate.com${path}`, {
     ...init,
     headers: {
@@ -59,7 +78,6 @@ async function replicateFetch(path: string, init?: RequestInit) {
 }
 
 function parseModel(ref: string) {
-  // "owner/name" or "owner/name:version"
   const [ownerName, version] = ref.split(':');
   const [owner, name] = ownerName.split('/');
   return { owner, name, version };
@@ -68,9 +86,9 @@ function parseModel(ref: string) {
 function buildInput(input: GenerateInput): Record<string, unknown> {
   const { mode, prompt, negativePrompt, imageUrl, params } = input;
   const extra = (params ?? {}) as Record<string, unknown>;
-  const { model: _ignored, version: _ignoredV, ...rest } = extra;
-  void _ignored;
-  void _ignoredV;
+  const { model: _m, version: _v, ...rest } = extra;
+  void _m;
+  void _v;
   const base: Record<string, unknown> = { ...rest };
   if (prompt) base.prompt = prompt;
   if (negativePrompt) base.negative_prompt = negativePrompt;
@@ -86,15 +104,13 @@ export const replicateProvider: VideoProvider = {
   id: 'replicate',
   name: 'Replicate',
   models: DEFAULT_MODELS,
-  isConfigured: () => Boolean(env.REPLICATE_API_TOKEN),
+  credentialFields: CREDENTIAL_FIELDS,
 
-  async generate(input: GenerateInput): Promise<GenerateResult> {
+  async generate(input): Promise<GenerateResult> {
     const params = (input.params ?? {}) as Record<string, unknown>;
     const modelRef = (params.model as string) ?? DEFAULT_MODELS[0].id;
     const { owner, name, version } = parseModel(modelRef);
-    const body: Record<string, unknown> = {
-      input: buildInput(input),
-    };
+    const body: Record<string, unknown> = { input: buildInput(input) };
     if (input.webhookUrl) {
       body.webhook = input.webhookUrl;
       body.webhook_events_filter = ['completed'];
@@ -102,21 +118,25 @@ export const replicateProvider: VideoProvider = {
     let data: any;
     if (version) {
       body.version = version;
-      data = await replicateFetch('/v1/predictions', {
+      data = await replicateFetch('/v1/predictions', input.credential, {
         method: 'POST',
         body: JSON.stringify(body),
       });
     } else {
-      data = await replicateFetch(`/v1/models/${owner}/${name}/predictions`, {
-        method: 'POST',
-        body: JSON.stringify(body),
-      });
+      data = await replicateFetch(
+        `/v1/models/${owner}/${name}/predictions`,
+        input.credential,
+        { method: 'POST', body: JSON.stringify(body) },
+      );
     }
     return { providerTaskId: data.id, raw: data };
   },
 
-  async getStatus(providerTaskId: string): Promise<TaskStatus> {
-    const data: any = await replicateFetch(`/v1/predictions/${providerTaskId}`);
+  async getStatus(providerTaskId, credential): Promise<TaskStatus> {
+    const data: any = await replicateFetch(
+      `/v1/predictions/${providerTaskId}`,
+      credential,
+    );
     const state = mapState(data.status);
     return {
       state,
@@ -127,10 +147,12 @@ export const replicateProvider: VideoProvider = {
     };
   },
 
-  async cancel(providerTaskId: string) {
-    await replicateFetch(`/v1/predictions/${providerTaskId}/cancel`, {
-      method: 'POST',
-    });
+  async cancel(providerTaskId, credential) {
+    await replicateFetch(
+      `/v1/predictions/${providerTaskId}/cancel`,
+      credential,
+      { method: 'POST' },
+    );
   },
 
   async parseWebhook(_headers, body) {
@@ -145,6 +167,16 @@ export const replicateProvider: VideoProvider = {
         raw: data,
       },
     };
+  },
+
+  async testCredential(credential) {
+    try {
+      // Calling /v1/account is a very cheap auth check.
+      await replicateFetch('/v1/account', credential);
+      return { ok: true, message: 'OK' };
+    } catch (err) {
+      return { ok: false, message: (err as Error).message };
+    }
   },
 };
 
