@@ -7,6 +7,7 @@ interface JobData {
   job: {
     id: string;
     provider: string;
+    credentialId: string | null;
     model: string;
     mode: string;
     status: string;

@@ -4,6 +4,10 @@ import { db, schema } from './db';
 import { env } from './env';
 import { jobsQueue } from './queue';
 import { getProvider } from './providers';
+import {
+  getCredentialPayload,
+  getDefaultCredentialId,
+} from './credentials';
 import type {
   GenerateInput,
   JobMode,
@@ -14,6 +18,7 @@ import { uploadFromUrl } from './storage';
 
 export interface CreateJobInput {
   provider: ProviderId;
+  credentialId?: string;
   model: string;
   mode: JobMode;
   prompt?: string;
@@ -26,11 +31,19 @@ export interface CreateJobInput {
 
 export async function createJob(input: CreateJobInput) {
   const id = nanoid(12);
+  const credentialId =
+    input.credentialId ?? (await getDefaultCredentialId(input.provider));
+  if (!credentialId) {
+    throw new Error(
+      `No credential configured for provider ${input.provider}. Add one in Settings first.`,
+    );
+  }
   const [row] = await db
     .insert(schema.jobs)
     .values({
       id,
       provider: input.provider,
+      credentialId,
       model: input.model,
       mode: input.mode,
       prompt: input.prompt,
@@ -89,10 +102,21 @@ export async function startJob(jobId: string) {
   if (job.status !== 'queued') return;
 
   const provider = getProvider(job.provider);
-  if (!provider.isConfigured()) {
+  const credentialId =
+    job.credentialId ?? (await getDefaultCredentialId(job.provider));
+  if (!credentialId) {
     await updateJobStatus(jobId, {
       status: 'failed',
-      error: `Provider ${job.provider} is not configured`,
+      error: `No credential configured for provider ${job.provider}`,
+      finishedAt: new Date(),
+    });
+    return;
+  }
+  const credential = await getCredentialPayload(credentialId);
+  if (!credential) {
+    await updateJobStatus(jobId, {
+      status: 'failed',
+      error: `Credential ${credentialId} not found`,
       finishedAt: new Date(),
     });
     return;
@@ -112,6 +136,7 @@ export async function startJob(jobId: string) {
     audioUrl,
     params: (job.params ?? {}) as Record<string, unknown>,
     webhookUrl: `${env.APP_BASE_URL}/api/webhooks/${job.provider}?jobId=${job.id}&secret=${env.WEBHOOK_SECRET}`,
+    credential,
   };
 
   try {
@@ -211,8 +236,19 @@ export async function pollJob(jobId: string, attempt = 0) {
     return;
   }
   const provider = getProvider(job.provider);
+  const credential = job.credentialId
+    ? await getCredentialPayload(job.credentialId)
+    : null;
+  if (!credential) {
+    await updateJobStatus(jobId, {
+      status: 'failed',
+      error: `Credential for job ${jobId} not found (was it deleted?)`,
+      finishedAt: new Date(),
+    });
+    return;
+  }
   try {
-    const status = await provider.getStatus(job.providerTaskId);
+    const status = await provider.getStatus(job.providerTaskId, credential);
     await applyTaskStatus(jobId, status);
   } catch (err) {
     console.error(`[poll] job ${jobId} failed`, err);

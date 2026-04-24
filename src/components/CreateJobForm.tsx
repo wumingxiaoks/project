@@ -1,14 +1,22 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import Link from 'next/link';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type { JobMode, ProviderId } from '@/lib/providers/types';
 
 interface ProviderInfo {
   id: ProviderId;
   name: string;
-  configured: boolean;
   models: { id: string; label: string; modes: JobMode[] }[];
+}
+
+interface CredentialSummary {
+  id: string;
+  provider: ProviderId;
+  label: string;
+  isDefault: boolean;
+  lastTestOk: boolean | null;
 }
 
 interface Props {
@@ -16,17 +24,47 @@ interface Props {
 }
 
 export function CreateJobForm({ providers }: Props) {
-  const [providerId, setProviderId] = useState<ProviderId>(
-    providers.find((p) => p.configured)?.id ?? providers[0].id,
-  );
+  const [credentials, setCredentials] = useState<CredentialSummary[]>([]);
+  const [credsLoaded, setCredsLoaded] = useState(false);
+
+  const loadCreds = useCallback(async () => {
+    const res = await fetch('/api/credentials');
+    if (res.ok) {
+      const d = await res.json();
+      setCredentials(d.credentials);
+    }
+    setCredsLoaded(true);
+  }, []);
+  useEffect(() => {
+    loadCreds();
+  }, [loadCreds]);
+
+  const [providerId, setProviderId] = useState<ProviderId>(providers[0].id);
   const provider = providers.find((p) => p.id === providerId)!;
+
+  const credsForProvider = useMemo(
+    () => credentials.filter((c) => c.provider === providerId),
+    [credentials, providerId],
+  );
+
+  const [credentialId, setCredentialId] = useState<string>('');
+  useEffect(() => {
+    if (credsForProvider.length === 0) {
+      setCredentialId('');
+      return;
+    }
+    if (credsForProvider.find((c) => c.id === credentialId)) return;
+    const def = credsForProvider.find((c) => c.isDefault);
+    setCredentialId((def ?? credsForProvider[0]).id);
+  }, [credsForProvider, credentialId]);
 
   const [modelId, setModelId] = useState(provider.models[0]?.id ?? '');
   const model = provider.models.find((m) => m.id === modelId);
 
-  const modeOptions = useMemo(() => {
-    return model?.modes ?? ['image-to-video', 'text-to-video'];
-  }, [model]);
+  const modeOptions = useMemo(
+    () => model?.modes ?? ['image-to-video', 'text-to-video'],
+    [model],
+  );
   const [mode, setMode] = useState<JobMode>(
     (modeOptions[0] as JobMode) ?? 'image-to-video',
   );
@@ -37,7 +75,6 @@ export function CreateJobForm({ providers }: Props) {
   const [aspect, setAspect] = useState('16:9');
   const [imageAssetId, setImageAssetId] = useState<string | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
-
   const [uploading, setUploading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -83,6 +120,12 @@ export function CreateJobForm({ providers }: Props) {
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    if (!credentialId) {
+      setError(
+        `No credential configured for ${provider.name}. Add one in Settings.`,
+      );
+      return;
+    }
     if (mode === 'image-to-video' && !imageAssetId) {
       setError('Please upload an image first.');
       return;
@@ -94,18 +137,19 @@ export function CreateJobForm({ providers }: Props) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           provider: providerId,
+          credentialId,
           model: modelId,
           mode,
           prompt,
           negativePrompt: negativePrompt || undefined,
           inputImageAssetId: imageAssetId ?? undefined,
-          params: {
-            duration,
-            aspect_ratio: aspect,
-          },
+          params: { duration, aspect_ratio: aspect },
         }),
       });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.error ?? (await res.text()));
+      }
       const data = await res.json();
       router.push(`/jobs/${data.job.id}`);
       router.refresh();
@@ -126,12 +170,39 @@ export function CreateJobForm({ providers }: Props) {
             onChange={(e) => onProviderChange(e.target.value as ProviderId)}
           >
             {providers.map((p) => (
-              <option key={p.id} value={p.id} disabled={!p.configured}>
-                {p.name} {p.configured ? '' : '(not configured)'}
+              <option key={p.id} value={p.id}>
+                {p.name}
               </option>
             ))}
           </select>
         </Field>
+
+        <Field label="Credential">
+          {credsLoaded && credsForProvider.length === 0 ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              No credentials for {provider.name}.{' '}
+              <Link href="/settings" className="underline">
+                Add one in Settings →
+              </Link>
+            </div>
+          ) : (
+            <select
+              className="input"
+              value={credentialId}
+              onChange={(e) => setCredentialId(e.target.value)}
+              required
+            >
+              {credsForProvider.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label}
+                  {c.isDefault ? ' (default)' : ''}
+                  {c.lastTestOk === false ? ' — last test failed' : ''}
+                </option>
+              ))}
+            </select>
+          )}
+        </Field>
+
         <Field label="Model">
           <select
             className="input"
@@ -241,15 +312,15 @@ export function CreateJobForm({ providers }: Props) {
         <button
           type="submit"
           className="btn-primary"
-          disabled={submitting || uploading}
+          disabled={submitting || uploading || !credentialId}
         >
           {submitting ? 'Submitting…' : 'Generate video'}
         </button>
-        <span className="text-xs text-slate-500">
-          {provider.configured
-            ? 'Ready'
-            : `Set ${provider.name} API keys in .env to enable`}
-        </span>
+        {!credentialId && credsLoaded && (
+          <span className="text-xs text-slate-500">
+            Add a {provider.name} credential to enable
+          </span>
+        )}
       </div>
 
       <style>{`
@@ -287,13 +358,7 @@ export function CreateJobForm({ providers }: Props) {
   );
 }
 
-function Field({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block">
       <span className="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">

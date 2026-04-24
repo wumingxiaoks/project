@@ -15,12 +15,13 @@ export function getProvider(id: ProviderId): VideoProvider {
   return p;
 }
 
-export function listProviders() {
+/** Describe provider metadata (no secrets). */
+export function describeProviders() {
   return Object.values(providers).map((p) => ({
     id: p.id,
     name: p.name,
-    configured: p.isConfigured(),
     models: p.models,
+    credentialFields: p.credentialFields,
   }));
 }
 

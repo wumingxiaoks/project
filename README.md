@@ -7,11 +7,13 @@
 ## 特性
 
 - **多 Provider 适配器**（Replicate / Kling / MiniMax Hailuo），易于扩展新的 Provider
-- **统一的 `VideoProvider` 抽象**：`generate / getStatus / cancel / parseWebhook`
+- **统一的 `VideoProvider` 抽象**：`generate / getStatus / cancel / parseWebhook / testCredential`
+- **Provider 凭证由前端管理**：每个 Provider 支持多个凭证，可设置默认、可"测试连通性"、可切换；**不用改 env、不用重启**
+- **AES-256-GCM 加密存储**：所有密钥在写入数据库前加密（主密钥 `SECRETS_KEY`）
 - **异步任务队列**（BullMQ + Redis），自动轮询 + 可选 webhook 回调
 - **对象存储**（S3 / MinIO）：上传的图片和生成的视频都会落到自己的 bucket
-- **Postgres + Drizzle ORM**：任务、资产的持久化
-- **Next.js 15 (App Router)** 前端：上传、选模型、查看任务进度、在线播放结果
+- **Postgres + Drizzle ORM**：任务、资产、凭证的持久化
+- **Next.js 15 (App Router)** 前端：上传、选模型、选凭证、查看任务进度、在线播放结果
 - **Docker Compose** 一键拉起 Web + Worker + Postgres + Redis + MinIO
 
 ## 架构
@@ -42,16 +44,20 @@
 ## 快速开始（Docker Compose，推荐）
 
 ```bash
-# 1. 准备环境变量
+# 1. 准备环境变量（基础设施配置，不含任何 provider key）
 cp .env.example .env
-# 编辑 .env，填入你的 provider API key（至少配一家才能真跑起来）
+# 必改：SECRETS_KEY（用于加密凭证）、WEBHOOK_SECRET
 
 # 2. 启动全部服务
 docker compose up -d --build
 
-# 3. 打开
-#    应用:      http://<your-server>:3000
-#    MinIO 控制台: http://<your-server>:9001   (minioadmin/minioadmin)
+# 3. 打开 http://<your-server>:3000
+#    → 右上角 Settings → 添加 Replicate / Kling / MiniMax 凭证
+#    → 每个 provider 可以添加多条凭证（按账号/项目分开）
+#    → 点 "Test" 一键验证 API 可用
+#    → 回首页，创建任务时从下拉里选要用哪条凭证
+#
+# MinIO 控制台: http://<your-server>:9001   (minioadmin/minioadmin)
 ```
 
 首次启动会自动：
@@ -76,18 +82,34 @@ pnpm worker       # 另开一个终端跑任务 worker
 
 见 [`.env.example`](./.env.example)。核心变量：
 
+**Provider API key 不在 env 里配置**，所有凭证都通过前端 Settings 页面管理，AES-256-GCM 加密后存进数据库。
+
 | 变量 | 说明 |
 |---|---|
 | `APP_BASE_URL` | 服务公网地址，用于生成 webhook 回调 URL |
 | `WEBHOOK_SECRET` | 校验 provider webhook 回调 |
+| `SECRETS_KEY` | **必须改**。加密凭证的主密钥（≥16 字符）。更换会导致已存凭证无法解密 |
 | `DATABASE_URL` | Postgres |
 | `REDIS_URL` | Redis |
 | `S3_*` | S3 兼容对象存储（自部署推荐 MinIO） |
-| `REPLICATE_API_TOKEN` | [Replicate](https://replicate.com/account/api-tokens) |
-| `KLING_ACCESS_KEY` / `KLING_SECRET_KEY` | [Kling 开放平台](https://app.klingai.com/global/dev-center)，JWT 签名用 |
-| `MINIMAX_API_KEY` / `MINIMAX_GROUP_ID` | [MiniMax](https://platform.minimaxi.com) |
 
-未配置的 provider 在前端会显示为灰色且不可选，不会影响其他 provider 使用。
+## 凭证管理
+
+在首页右上角 **Settings** 里：
+
+- 每个 Provider 可以添加 **多个凭证**（按账号 / 项目 / 环境分）
+- 每条凭证可以 **设为默认**（创建任务时默认被选中）
+- 每条凭证都有 **Test** 按钮：调用该 provider 的一个廉价鉴权接口（Replicate `/v1/account`、Kling 列任务、MiniMax 列文件）实时验证
+- 密钥字段（Secret Key / API Token / API Key）以 `r8_t••••34` 形式回显，不会明文再显示
+- 编辑时 **Secret 字段留空 = 保留原值**
+
+每家需要的字段由 Provider 描述（`credentialFields`），前端自动渲染：
+
+| Provider | 字段 |
+|---|---|
+| Replicate | `apiToken` |
+| Kling | `accessKey`, `secretKey`, `apiBase`（默认 Singapore） |
+| MiniMax | `apiKey`, `groupId`（可选）, `apiBase` |
 
 ## 添加新的 Provider
 
@@ -103,11 +125,26 @@ interface VideoProvider {
   id: ProviderId;
   name: string;
   models: ModelDescriptor[];
-  isConfigured(): boolean;
+  /** 告诉前端要渲染哪些输入框，哪些是 secret */
+  credentialFields: CredentialFieldSpec[];
   generate(input: GenerateInput): Promise<{ providerTaskId: string }>;
-  getStatus(providerTaskId: string): Promise<TaskStatus>;
-  cancel?(providerTaskId: string): Promise<void>;
+  getStatus(taskId: string, credential: CredentialPayload): Promise<TaskStatus>;
+  cancel?(taskId: string, credential: CredentialPayload): Promise<void>;
   parseWebhook?(headers, body): Promise<{ providerTaskId, status } | null>;
+  /** 前端 "Test" 按钮会调到这里做实时鉴权 */
+  testCredential(credential: CredentialPayload): Promise<{ ok: boolean; message: string }>;
+}
+```
+
+凭证在运行时以 `CredentialPayload` 形式传入：
+
+```ts
+interface CredentialPayload {
+  id: string;
+  provider: ProviderId;
+  label: string;
+  config: Record<string, string | undefined>;   // 非 secret：apiBase 等
+  secrets: Record<string, string | undefined>;  // secret：apiToken / secretKey 等
 }
 ```
 
@@ -125,12 +162,20 @@ interface VideoProvider {
 ├── src/
 │   ├── app/                    # Next.js App Router
 │   │   ├── api/                # API routes
-│   │   ├── jobs/               # 列表 + 详情页
-│   │   └── page.tsx            # 首页（创建 + 最近任务）
+│   │   │   ├── credentials/    # 凭证 CRUD + /test
+│   │   │   ├── jobs/           # 任务 CRUD
+│   │   │   ├── uploads/        # 图片上传到 S3
+│   │   │   ├── providers/      # Provider 元数据（含 credentialFields）
+│   │   │   └── webhooks/       # provider 回调
+│   │   ├── settings/           # 凭证管理页面
+│   │   ├── jobs/               # 任务列表 + 详情
+│   │   └── page.tsx            # 首页
 │   ├── components/             # React 组件
 │   └── lib/
 │       ├── db/                 # Drizzle schema / client / migrator
 │       ├── providers/          # Provider 适配器（核心）
+│       ├── credentials.ts      # 凭证增删改查 + 解密/加密封装
+│       ├── crypto.ts           # AES-256-GCM
 │       ├── env.ts              # env 校验
 │       ├── jobs.ts             # 任务状态机
 │       ├── queue.ts            # BullMQ
