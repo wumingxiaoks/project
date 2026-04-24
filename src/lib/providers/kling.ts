@@ -18,13 +18,28 @@ import type {
 const DEFAULT_API_BASE = 'https://api-singapore.klingai.com';
 
 const MODELS: ModelDescriptor[] = [
-  { id: 'kling-v2-1', label: 'Kling v2.1', modes: ['image-to-video', 'text-to-video'] },
+  {
+    id: 'kling-v2-1',
+    label: 'Kling v2.1',
+    modes: ['image-to-video', 'text-to-video'],
+  },
   {
     id: 'kling-v2-1-master',
     label: 'Kling v2.1 Master',
     modes: ['image-to-video', 'text-to-video'],
   },
-  { id: 'kling-v1-6', label: 'Kling v1.6', modes: ['image-to-video', 'text-to-video'] },
+  {
+    id: 'kling-v1-6',
+    label: 'Kling v1.6',
+    modes: ['image-to-video', 'text-to-video'],
+  },
+  {
+    id: 'kling-motion-control',
+    label: 'Motion Control (image + reference video → same actions)',
+    modes: ['act'],
+    description:
+      'Takes a character image + a reference motion video and makes the character in the image perform the same actions as the person in the video.',
+  },
 ];
 
 const CREDENTIAL_FIELDS: CredentialFieldSpec[] = [
@@ -158,16 +173,60 @@ export const klingProvider: VideoProvider = {
       return { providerTaskId: data.data.task_id, raw: data };
     }
 
+    if (input.mode === 'act') {
+      // Motion control: transfer the motion from a reference video onto the
+      // character in an image. Docs:
+      // https://app.klingai.com/cn/dev/document-api/apiReference/model/motionControl
+      if (!input.imageUrl) throw new Error('imageUrl required for motion-control');
+      if (!input.videoUrl) {
+        throw new Error('videoUrl (reference motion video) required for motion-control');
+      }
+      const orientation =
+        (params.character_orientation as string) === 'video'
+          ? 'video'
+          : 'image';
+      const keepOriginalSound =
+        params.keep_original_sound === undefined
+          ? 'yes'
+          : params.keep_original_sound ? 'yes' : 'no';
+      const body: Record<string, unknown> = {
+        image_url: input.imageUrl,
+        video_url: input.videoUrl,
+        character_orientation: orientation,
+        mode: mode === 'pro' ? 'pro' : 'std',
+        keep_original_sound: keepOriginalSound,
+      };
+      if (input.prompt) body.prompt = input.prompt;
+      if (input.webhookUrl) body.callback_url = input.webhookUrl;
+      const data = await klingFetch('/v1/videos/motion-control', input.credential, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      return { providerTaskId: data.data.task_id, raw: data };
+    }
+
     throw new Error(`Kling does not support mode: ${input.mode}`);
   },
 
   async getStatus(providerTaskId, credential): Promise<TaskStatus> {
-    const data = await klingFetch(
-      `/v1/videos/image2video/${providerTaskId}`,
-      credential,
-    ).catch(() =>
-      klingFetch(`/v1/videos/text2video/${providerTaskId}`, credential),
-    );
+    // We don't know which endpoint the task lives on, so try image2video first,
+    // then text2video, then motion-control.
+    const endpoints = [
+      '/v1/videos/image2video',
+      '/v1/videos/text2video',
+      '/v1/videos/motion-control',
+    ];
+    let data: any = null;
+    let lastErr: unknown = null;
+    for (const ep of endpoints) {
+      try {
+        data = await klingFetch(`${ep}/${providerTaskId}`, credential);
+        break;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (!data) throw lastErr ?? new Error('Kling getStatus failed');
     const status = data?.data?.task_status as string | undefined;
     const state = mapState(status);
     const videoUrl: string | undefined =

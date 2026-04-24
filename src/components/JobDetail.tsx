@@ -106,6 +106,20 @@ export function JobDetail({ jobId }: { jobId: string }) {
           </div>
         )}
 
+        {assets.inputVideo && (
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Reference motion video
+            </h3>
+            <video
+              src={assets.inputVideo.url}
+              controls
+              muted
+              className="w-full rounded-md bg-black"
+            />
+          </div>
+        )}
+
         <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
             Output
